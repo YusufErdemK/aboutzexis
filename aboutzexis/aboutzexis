@@ -1,0 +1,629 @@
+#!/usr/bin/python3
+# AboutZexis - "About this PC" for Zexis OS
+# Adapted from AboutThisMc by hungngocphat01 (GPLv3)
+# Zexis OS edition
+
+from typing import OrderedDict
+import gi, json, os, subprocess, re, sys, shutil
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, GdkPixbuf, Gdk
+
+SCRIPTDIR = os.path.dirname(os.path.realpath(__file__))
+DEFAULT_OV_CONF = SCRIPTDIR + "/zexis-conf.json"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def show_error(maintext, secondarytext):
+    print(maintext, ":", secondarytext)
+    dialog = Gtk.MessageDialog(
+        flags=0,
+        message_type=Gtk.MessageType.ERROR,
+        buttons=Gtk.ButtonsType.OK,
+        text=maintext
+    )
+    dialog.format_secondary_text(secondarytext)
+    dialog.run()
+    dialog.destroy()
+
+# ---------------------------------------------------------------------------
+# Main Window
+# ---------------------------------------------------------------------------
+
+class MainWindow(Gtk.Window):
+    def __init__(self, overview_json_path=DEFAULT_OV_CONF):
+        Gtk.Window.__init__(self, title="About Zexis OS")
+        self.set_resizable(False)
+
+        # Custom headerbar
+        self.hb = Gtk.HeaderBar()
+        self.hb.props.show_close_button = True
+        self.set_titlebar(self.hb)
+
+        # Stack + stack switcher
+        self.stack = Gtk.Stack()
+        self.add(self.stack)
+        self.stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
+        self.stack.set_transition_duration(400)
+
+        self.stack_sw = Gtk.StackSwitcher()
+        self.stack_sw.set_stack(self.stack)
+        self.hb.set_custom_title(self.stack_sw)
+
+        # Tabs
+        self.overview_json_path = overview_json_path
+        self.overview_init()   # Overview
+        self.zexis_init()      # Zexis OS bilgileri  ← YENİ
+        self.display_init()    # Ekran
+        self.storage_init()    # Depolama
+        self.support_init()    # Destek
+
+    # ------------------------------------------------------------------
+    # Overview Tab
+    # ------------------------------------------------------------------
+    def overview_init(self):
+        print("Yapılandırma yükleniyor:", self.overview_json_path)
+        with open(self.overview_json_path, mode="rt") as f:
+            conf = json.loads(f.read())
+
+        if not validate_overview_json(self.overview_json_path):
+            sys.exit(-1)
+
+        overview_layout = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=conf["logo_space"]
+        )
+        self.stack.add_titled(overview_layout, "overview_layout", "Genel Bakış")
+
+        # Sağ sütun
+        vbox        = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=conf["section_space"])
+        distro_info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        system_info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        addi_btn    = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+
+        distro_info.props.halign = system_info.props.halign = addi_btn.props.halign = Gtk.Align.START
+
+        # Distro adı / versiyonu
+        distro_name = Gtk.Label()
+        distro_name.set_markup(conf["distro_markup"])
+        distro_name.props.halign = Gtk.Align.START
+        distro_ver = Gtk.Label(label=conf["distro_ver"])
+        distro_ver.props.halign = Gtk.Align.START
+        distro_info.pack_start(distro_name, False, False, 0)
+        distro_info.pack_start(distro_ver,  False, False, 0)
+
+        # Sistem bilgileri
+        FIELD_SP = 20
+        hostname = Gtk.Label()
+        hostname.set_markup(f"{conf['hostname']}")
+        hostname.props.halign = Gtk.Align.START
+        system_info.pack_start(hostname, False, False, 0)
+
+        info_dict = {
+            "İşlemci":       conf["cpu"],
+            "Bellek":        conf["memory"],
+            "Başlangıç Diski": conf["startup_disk"],
+            "Grafik":        conf["graphics"],
+            "Seri No":       conf["serial_num"],
+        }
+
+        for key, value in info_dict.items():
+            line = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=FIELD_SP)
+            lbl  = Gtk.Label()
+            lbl.set_markup(f"<b>{key}</b>")
+            lbl.props.halign = Gtk.Align.START
+            line.pack_start(lbl,                        False, False, 0)
+            line.pack_start(Gtk.Label(label=value),     False, False, 0)
+            line.props.halign = Gtk.Align.START
+            system_info.pack_start(line, False, False, 0)
+
+        # Alt butonlar
+        sys_report_btn  = Gtk.Button(label="Sistem Raporu...")
+        software_upd_btn = Gtk.Button(label="Yazılım Güncelleme...")
+        addi_btn.pack_start(sys_report_btn,   False, False, 0)
+        addi_btn.pack_start(software_upd_btn, False, False, 0)
+
+        vbox.pack_start(distro_info, True, True, 0)
+        vbox.pack_start(system_info, True, True, 0)
+        vbox.pack_start(addi_btn,    True, True, 0)
+
+        # Distro görseli
+        pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+            filename=conf["distro_image_path"],
+            width=conf["distro_image_size"][0],
+            height=conf["distro_image_size"][1],
+            preserve_aspect_ratio=True
+        )
+        distro_img = Gtk.Image.new_from_pixbuf(pixbuf)
+        overview_layout.pack_start(distro_img, True, True, 0)
+        overview_layout.pack_start(vbox,       True, True, 0)
+
+        overview_layout.props.margin_start  = conf["overview_margins"][0]
+        overview_layout.props.margin_end    = conf["overview_margins"][1]
+        overview_layout.props.margin_top    = conf["overview_margins"][2]
+        overview_layout.props.margin_bottom = conf["overview_margins"][3]
+
+    # ------------------------------------------------------------------
+    # Zexis OS Tab  ← YENİ SEKME
+    # ------------------------------------------------------------------
+    def zexis_init(self):
+        with open(self.overview_json_path, mode="rt") as f:
+            conf = json.loads(f.read())
+
+        zexis_layout = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=16
+        )
+        zexis_layout.props.margin_start  = 40
+        zexis_layout.props.margin_end    = 40
+        zexis_layout.props.margin_top    = 30
+        zexis_layout.props.margin_bottom = 30
+        zexis_layout.props.halign        = Gtk.Align.START
+
+        self.stack.add_titled(zexis_layout, "zexis_layout", "Zexis OS")
+
+        # Başlık
+        title = Gtk.Label()
+        title.set_markup('<span size="x-large" weight="bold">Zexis OS Bilgileri</span>')
+        title.props.halign = Gtk.Align.START
+        zexis_layout.pack_start(title, False, False, 0)
+
+        # Separator
+        zexis_layout.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
+
+        # Zexis'e özgü bilgi alanları
+        zexis_fields = {
+            "Zexis Sürümü":    conf.get("zexis_version",    "—"),
+            "Zexis Kod Adı":   conf.get("zexis_codename",   "—"),
+            "Zexis Yapısı":    conf.get("zexis_build",      "—"),
+            "Çekirdek":        conf.get("kernel",           "—"),
+            "Masaüstü Ortamı": conf.get("desktop_env",      "—"),
+            "Paket Yöneticisi": conf.get("package_manager", "—"),
+            "Kurulum Tarihi":  conf.get("install_date",     "—"),
+        }
+
+        for label_text, value in zexis_fields.items():
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=20)
+            lbl = Gtk.Label()
+            lbl.set_markup(f"<b>{label_text}</b>")
+            lbl.set_width_chars(20)
+            lbl.props.xalign = 0
+            val_lbl = Gtk.Label(label=value)
+            val_lbl.props.xalign = 0
+            row.pack_start(lbl,     False, False, 0)
+            row.pack_start(val_lbl, False, False, 0)
+            zexis_layout.pack_start(row, False, False, 0)
+
+        # Separator
+        zexis_layout.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 4)
+
+        # Güncelleme butonu
+        update_btn = Gtk.Button(label="Zexis Güncellemelerini Kontrol Et")
+        update_btn.props.halign = Gtk.Align.START
+        update_cmd = conf.get("software_update_command", "")
+        update_btn.connect("clicked", lambda _: subprocess.Popen(update_cmd, shell=True) if update_cmd else None)
+        zexis_layout.pack_start(update_btn, False, False, 0)
+
+    # ------------------------------------------------------------------
+    # Display Tab
+    # ------------------------------------------------------------------
+    def display_init(self):
+        display_layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        display_layout.props.margin_start  = 40
+        display_layout.props.margin_end    = 40
+        display_layout.props.margin_top    = 30
+        display_layout.props.margin_bottom = 30
+        display_layout.props.halign        = Gtk.Align.START
+
+        self.stack.add_titled(display_layout, "display_layout", "Ekran")
+
+        title = Gtk.Label()
+        title.set_markup('<span size="x-large" weight="bold">Ekran Bilgileri</span>')
+        title.props.halign = Gtk.Align.START
+        display_layout.pack_start(title, False, False, 0)
+        display_layout.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
+
+        # xrandr'dan ekran çözünürlüklerini oku
+        try:
+            xrandr = subprocess.check_output("xrandr | grep ' connected'", shell=True).decode("utf-8").strip()
+            for line in xrandr.split("\n"):
+                lbl = Gtk.Label(label=line.strip())
+                lbl.props.halign = Gtk.Align.START
+                display_layout.pack_start(lbl, False, False, 0)
+        except Exception:
+            display_layout.pack_start(
+                Gtk.Label(label="Ekran bilgisi alınamadı. (xrandr gereklidir)"), False, False, 0
+            )
+
+    # ------------------------------------------------------------------
+    # Storage Tab
+    # ------------------------------------------------------------------
+    def storage_init(self):
+        storage_layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        storage_layout.props.margin_start  = 40
+        storage_layout.props.margin_end    = 40
+        storage_layout.props.margin_top    = 30
+        storage_layout.props.margin_bottom = 30
+        storage_layout.props.halign        = Gtk.Align.START
+
+        self.stack.add_titled(storage_layout, "storage_layout", "Depolama")
+
+        title = Gtk.Label()
+        title.set_markup('<span size="x-large" weight="bold">Depolama</span>')
+        title.props.halign = Gtk.Align.START
+        storage_layout.pack_start(title, False, False, 0)
+        storage_layout.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
+
+        # df -h ile disk bilgisi
+        try:
+            df_output = subprocess.check_output("df -h --output=source,size,used,avail,pcent,target | grep '^/'", shell=True).decode("utf-8").strip()
+            header = Gtk.Label()
+            header.set_markup("<b>Aygıt          Boyut  Kullanılan  Boş    %  Bağlama Noktası</b>")
+            header.props.halign = Gtk.Align.START
+            storage_layout.pack_start(header, False, False, 0)
+            for line in df_output.split("\n"):
+                lbl = Gtk.Label(label=line)
+                lbl.props.halign = Gtk.Align.START
+                storage_layout.pack_start(lbl, False, False, 0)
+        except Exception:
+            storage_layout.pack_start(
+                Gtk.Label(label="Depolama bilgisi alınamadı."), False, False, 0
+            )
+
+    # ------------------------------------------------------------------
+    # Support Tab
+    # ------------------------------------------------------------------
+    def support_init(self):
+        support_layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        support_layout.props.margin_start  = 40
+        support_layout.props.margin_end    = 40
+        support_layout.props.margin_top    = 30
+        support_layout.props.margin_bottom = 30
+
+        self.stack.add_titled(support_layout, "support_layout", "Destek")
+
+        title = Gtk.Label()
+        title.set_markup('<span size="x-large" weight="bold">Zexis OS Destek</span>')
+        title.props.halign = Gtk.Align.START
+        support_layout.pack_start(title, False, False, 0)
+        support_layout.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
+
+        info = Gtk.Label()
+        info.set_markup(
+            "AboutZexis — Zexis OS için 'Bu Bilgisayar Hakkında' uygulaması.\n\n"
+            "Sorunlar ve geri bildirim için Zexis OS proje sayfasını ziyaret edin."
+        )
+        info.props.halign = Gtk.Align.START
+        info.set_line_wrap(True)
+        support_layout.pack_start(info, False, False, 0)
+
+
+# ---------------------------------------------------------------------------
+# Utility
+# ---------------------------------------------------------------------------
+
+clrscr          = lambda: os.system("clear")
+get_sys_stdout  = lambda cmd: subprocess.check_output(cmd, shell=True)
+
+
+def config_confirm():
+    usr_input = input("Sonuçtan memnun musunuz? [E/h]: ").lower()
+    if usr_input in ["", "e", "y"]:
+        return True
+    if usr_input == "h":
+        return False
+    input("Geçersiz seçenek. Bu bölüm yeniden başlatılacak.\nDevam etmek için Enter'a basın.")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Configuration wizard
+# ---------------------------------------------------------------------------
+
+def start_configuration(config_path=DEFAULT_OV_CONF):
+    json_data = {
+        # --- Overview ---
+        "distro_image_path":        "zexis-logo.png",
+        "distro_image_size":        [160, 160],
+        "distro_markup":            "",
+        "distro_ver":               "",
+        "hostname":                 "",
+        "cpu":                      "",
+        "memory":                   "",
+        "startup_disk":             "",
+        "graphics":                 "",
+        "serial_num":               "",
+        "overview_margins":         [60, 60, 60, 60],
+        "section_space":            20,
+        "logo_space":               60,
+        "system_info_command":      "",
+        "software_update_command":  "",
+        "font-family":              None,
+        # --- Zexis OS ---
+        "zexis_version":            "",
+        "zexis_codename":           "",
+        "zexis_build":              "",
+        "kernel":                   "",
+        "desktop_env":              "",
+        "package_manager":          "",
+        "install_date":             "",
+    }
+
+    clrscr()
+    print("=" * 60)
+    print("  AboutZexis - Zexis OS Yapılandırma Sihirbazı")
+    print("=" * 60)
+    print()
+    print("Sistem bilgileriniz otomatik algılanacak.")
+    print("Gerekli araçlar: neofetch, dmidecode, lsblk, xrandr")
+    print("Seçilen yapılandırma dosyası:", config_path)
+    input("\nHazır olduğunuzda Enter'a basın.")
+
+    # --- neofetch ---
+    neofetch_output = get_sys_stdout("/usr/bin/neofetch --off --color_blocks=off").decode("utf-8")
+    ansi_escape     = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+    neofetch_output = ansi_escape.sub("", neofetch_output).replace("\r\n", "\n").split("\n")
+    neofetch_sys_info = {}
+    for line in neofetch_output:
+        parts = line.strip().split(":")
+        if len(parts) >= 2:
+            neofetch_sys_info[parts[0].strip()] = ":".join(parts[1:]).strip()
+
+    # --- Makine adı ---
+    while True:
+        clrscr()
+        print("1/7 — Sistem modeli\n")
+        if "Host" not in neofetch_sys_info or input("Kendi sistem modelinizi mi girmek istiyorsunuz? [e/H]: ").lower() == "e":
+            json_data["hostname"] = input("Sistem modelini girin: ")
+        else:
+            json_data["hostname"] = neofetch_sys_info["Host"]
+            print("Algılanan sistem modeli:", json_data["hostname"])
+        if config_confirm():
+            break
+
+    # --- Distro adı / sürümü ---
+    while True:
+        clrscr()
+        print("2/7 — Distro adı ve sürümü\n")
+        os_release_raw = get_sys_stdout("cat /etc/os-release").decode("utf-8")
+        os_release_raw = os_release_raw.replace('"', '').replace("\r\n", "\n").split("\n")
+        os_release = {}
+        for line in os_release_raw:
+            parts = line.split("=")
+            if len(parts) == 2:
+                os_release[parts[0].upper()] = parts[1].strip()
+
+        part1 = os_release.get("NAME", "Zexis OS")
+        part2 = os_release.get("VERSION_CODENAME", "")
+        json_data["distro_ver"] = os_release.get("VERSION", neofetch_sys_info.get("Kernel", ""))
+        json_data["distro_markup"] = f"<b>{part1}</b> {part2}"
+
+        print("Algılanan distro adı:", part1)
+        print("Kod adı:", part2)
+        print("Sürüm:", json_data["distro_ver"])
+        if config_confirm():
+            break
+
+    # --- Zexis OS özel bilgileri ---
+    while True:
+        clrscr()
+        print("3/7 — Zexis OS özel bilgileri\n")
+        json_data["zexis_version"]  = input("Zexis OS sürümü (örn. 1.0.0): ").strip()
+        json_data["zexis_codename"] = input("Zexis kod adı (örn. Aurora): ").strip()
+        json_data["zexis_build"]    = input("Yapı numarası (örn. 20240101): ").strip()
+        json_data["kernel"]         = neofetch_sys_info.get("Kernel", "")
+        json_data["desktop_env"]    = neofetch_sys_info.get("DE", neofetch_sys_info.get("WM", ""))
+        json_data["package_manager"] = input("Paket yöneticisi (örn. apt, pacman, dnf): ").strip()
+        from datetime import date
+        json_data["install_date"]   = input(f"Kurulum tarihi [{date.today()}]: ").strip() or str(date.today())
+        print("\nGirilen bilgiler:")
+        for k in ["zexis_version","zexis_codename","zexis_build","kernel","desktop_env","package_manager","install_date"]:
+            print(f"  {k}: {json_data[k]}")
+        if config_confirm():
+            break
+
+    # --- CPU ---
+    json_data["cpu"] = " ".join([x.strip() for x in reversed(neofetch_sys_info.get("CPU","").split("@"))])
+
+    # --- RAM ---
+    clrscr()
+    print("4/7 — RAM bilgisi (dmidecode ile, sudo gerekebilir)\n")
+    try:
+        dmid_output = get_sys_stdout("sudo dmidecode --type memory").decode("utf-8")
+        dmid_output = dmid_output.replace("\t","").replace("\r\n","\n").split("\n")
+        ram_size = 0.0
+        ram_bus = ""
+        ram_technology = ""
+        for line in dmid_output:
+            parts = [x.strip() for x in line.strip().split(":")]
+            if parts[0] == "Size" and len(parts) > 1:
+                s = parts[1].split()
+                if len(s) >= 2:
+                    val = float(s[0])
+                    unit = s[1]
+                    if unit == "GB":   ram_size += val
+                    elif unit == "MB": ram_size += val / 1024
+                    elif unit == "TB": ram_size += val * 1024
+            if parts[0] == "Speed" and len(parts) > 1:
+                ram_bus = parts[1].replace("MT/s","MHz")
+            if parts[0] == "Type" and len(parts) > 1:
+                ram_technology = parts[1]
+
+        if ram_size < 1:
+            ram_unit = "MB"
+            ram_size *= 1024
+        elif ram_size >= 1024:
+            ram_unit = "TB"
+            ram_size /= 1024
+        else:
+            ram_unit = "GB"
+
+        json_data["memory"] = f"{int(ram_size) if ram_size == int(ram_size) else ram_size} {ram_unit} {ram_bus} {ram_technology}".strip()
+    except Exception as e:
+        json_data["memory"] = neofetch_sys_info.get("Memory", "Bilinmiyor")
+    print("Bellek:", json_data["memory"])
+    input("Devam etmek için Enter'a basın...")
+
+    # --- Startup disk ---
+    try:
+        lsblk_output = get_sys_stdout("lsblk -o mountpoint,name,label --list | grep /").decode("utf-8").replace("\r\n","\n").split("\n")
+        for line in lsblk_output:
+            parts = line.split()
+            if len(parts) >= 1 and parts[0] == "/":
+                json_data["startup_disk"] = " ".join(parts[2:]) if len(parts) >= 3 else parts[1]
+                break
+    except Exception:
+        json_data["startup_disk"] = "Bilinmiyor"
+
+    # --- GPU ---
+    json_data["graphics"] = neofetch_sys_info.get("GPU", "Bilinmiyor")
+
+    # --- Seri No ---
+    try:
+        json_data["serial_num"] = get_sys_stdout(
+            r"sudo dmidecode --type baseboard | grep Serial | sed 's/^[ \t]*Serial Number: //'"
+        ).decode("utf-8").strip()
+    except Exception:
+        json_data["serial_num"] = "Bilinmiyor"
+
+    # --- Logo ---
+    while True:
+        clrscr()
+        print("5/7 — Zexis OS logosu\n")
+        image_path = input("Logo dosyasının tam yolunu girin: ").strip()
+        if not os.path.exists(image_path):
+            input("Belirtilen dosya bulunamadı. Devam etmek için Enter'a basın...")
+        else:
+            dest = SCRIPTDIR + "/zexis-logo.png"
+            shutil.copy(image_path, dest)
+            json_data["distro_image_path"] = dest
+            break
+
+    # --- Güncelleme komutu ---
+    clrscr()
+    print("6/7 — Yazılım güncelleme komutu\n")
+    json_data["software_update_command"] = input(
+        "Güncelleme komutu (örn. 'sudo apt update && sudo apt upgrade'): "
+    ).strip()
+
+    # --- Kaydet ---
+    with open(config_path, mode="wt") as f:
+        json.dump(json_data, f, indent=2, ensure_ascii=False)
+
+    clrscr()
+    print("=" * 60)
+    print("  Yapılandırma tamamlandı!")
+    print("=" * 60)
+    print(f"Sistem bilgileriniz şuraya kaydedildi: {config_path}")
+    print("Yapılandırmayı yeniden çalıştırmak için: about-zexis configure")
+    print("Yardım için: about-zexis help")
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+def validate_overview_json(path) -> bool:
+    if not os.path.exists(path):
+        show_error("Dosya bulunamadı", f"Belirtilen yol mevcut değil: {path}")
+        return False
+
+    with open(path, mode="rt") as f:
+        json_data = json.loads(f.read())
+
+    required_keys = [
+        "distro_image_path", "distro_image_size", "distro_markup", "distro_ver",
+        "hostname", "cpu", "memory", "startup_disk", "graphics", "serial_num",
+        "overview_margins", "section_space", "logo_space",
+        "system_info_command", "software_update_command", "font-family",
+    ]
+    for key in required_keys:
+        if key not in json_data:
+            show_error("Geçersiz yapılandırma", f"Eksik anahtar: {key}. Lütfen yapılandırmayı yeniden çalıştırın.")
+            return False
+
+    if not os.path.exists(json_data["distro_image_path"]):
+        show_error("Geçersiz yol", f"Logo dosyası bulunamadı:\n{json_data['distro_image_path']}")
+        return False
+
+    if not isinstance(json_data["distro_image_size"], list):
+        show_error("Geçersiz yapılandırma", "distro_image_size bir liste olmalıdır.")
+        return False
+    for item in json_data["distro_image_size"]:
+        if not isinstance(item, (int, float)):
+            show_error("Geçersiz yapılandırma", "distro_image_size elemanları sayısal olmalıdır.")
+            return False
+
+    if not isinstance(json_data["overview_margins"], list):
+        show_error("Geçersiz yapılandırma", "overview_margins bir liste olmalıdır.")
+        return False
+    for item in json_data["overview_margins"]:
+        if not isinstance(item, (int, float)):
+            show_error("Geçersiz yapılandırma", "overview_margins elemanları sayısal olmalıdır.")
+            return False
+
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Help
+# ---------------------------------------------------------------------------
+
+def print_help():
+    print("""
+AboutZexis — Zexis OS için "Bu Bilgisayar Hakkında" uygulaması.
+GPLv3 lisansı altında dağıtılmaktadır.
+
+KULLANIM
+  about-zexis                          → Programı normal çalıştır
+  about-zexis configure                → Yapılandırma sihirbazını başlat
+  about-zexis configure <yol>          → Özel yola yapılandırma yaz
+  about-zexis load-overview <json>     → Özel JSON dosyasıyla çalıştır
+  about-zexis help                     → Bu yardım mesajını göster
+
+NOTLAR
+  - Donanım değişikliği sonrası yapılandırmayı yeniden çalıştırın.
+  - Birden fazla JSON profili oluşturup yükleyebilirsiniz.
+  - Zexis OS'a özgü bilgiler (sürüm, kod adı vb.) zexis-conf.json içinde saklanır.
+""")
+
+
+# ---------------------------------------------------------------------------
+# Normal run
+# ---------------------------------------------------------------------------
+
+def normal_run(overview_json=DEFAULT_OV_CONF):
+    w = MainWindow(overview_json)
+    w.connect("destroy", Gtk.main_quit)
+    w.show_all()
+    Gtk.main()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        command = sys.argv[1].lower()
+    else:
+        command = None
+
+    if command == "configure":
+        if len(sys.argv) >= 3:
+            start_configuration(sys.argv[2])
+        else:
+            start_configuration()
+    elif command == "help":
+        print_help()
+    elif command == "load-overview":
+        if len(sys.argv) >= 3:
+            normal_run(sys.argv[2])
+        else:
+            print("Hata: load-overview için bir JSON dosyası belirtmelisiniz.")
+    else:
+        if not os.path.exists(DEFAULT_OV_CONF):
+            start_configuration()
+        else:
+            normal_run()
